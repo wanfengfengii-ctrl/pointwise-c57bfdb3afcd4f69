@@ -1,0 +1,20 @@
+{
+  "day": "2026-10-12",
+  "station": "S01",
+  "batch_id": "O1",
+  "report_id": "R1",
+  "close_id": "C1",
+  "rules": [
+    {"op":"put","key":"B","group":"length","priority":1,"lower":0,"upper":10,"offset":7},
+    {"op":"put","key":"A","group":"length","priority":1,"lower":0,"upper":10,"offset":2}
+  ],
+  "update": [
+    {"op":"put","key":"A","group":"length","priority":1,"lower":0,"upper":10,"offset":4}
+  ],
+  "observations": [
+    {"group":"length","reading":5,"unit":"um"},
+    {"group":"length","reading":5,"unit":"um"},
+    {"group":"length","reading":10,"unit":"um"},
+    {"group":"length","reading":null,"unit":"um"}
+  ]
+}
