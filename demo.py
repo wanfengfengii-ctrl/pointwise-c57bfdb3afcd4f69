@@ -10,7 +10,9 @@ from lake.closing.publication import close_day
 from lake.intake.batches import admit
 from lake.intake.objects import ObservationObjects
 from lake.reports.publication import process
-from lake.rules.revisions import load_rules, read_catalog_head
+from lake.rules.revisions import (
+    enable_withdrawal, load_rules, read_catalog_head, withdraw_rules,
+)
 from lake.rules.snapshots import get_catalog
 from lake.store import initialize
 
@@ -78,6 +80,82 @@ def main():
         'oracle': 'A wins ties at 5 and adds 2 twice. The right endpoint 10 has no match. Null is missing. Night shift sums 7 + 7 and recounts the two other states separately.',
     }
     print('POINTWISE_SCENARIO ' + json.dumps(evidence, ensure_ascii=False, separators=(',', ':')))
+    for event in demonstrate_withdrawal():
+        print('WITHDRAWAL_SCENARIO ' + json.dumps(event, ensure_ascii=False,
+                                                  separators=(',', ':')))
+
+
+def _issue(db, objects, report_id, revision, readings):
+    raw = json.dumps([{'group': 'length', 'reading': reading, 'unit': 'um'}
+                      for reading in readings]).encode('utf-8')
+    batch_id = 'OBS-' + report_id
+    admit(db, objects, batch_id, 'S01', '2026-10-12', raw)
+    return process(db, objects, report_id, batch_id, revision)
+
+
+def demonstrate_withdrawal():
+    """Show interception when history changes, then a no-impact withdrawal."""
+    events = []
+    with TemporaryDirectory() as folder:
+        path = Path(folder) / 'withdrawal-demo.sqlite'
+        with closing(sqlite3.connect(path)) as db:
+            initialize(db)
+            source = ObservationObjects()
+            anchor = load_rules(db, 'BASE', [
+                {'op': 'put', 'key': 'A', 'group': 'length', 'priority': 1,
+                 'lower': 0, 'upper': 10, 'offset': 2},
+            ])
+            enable_withdrawal(db)
+            interim = load_rules(db, 'MISFILED', [{'op': 'delete', 'key': 'A'}])
+            _issue(db, source, 'Z-outside', interim, [12])
+            _issue(db, source, 'Y-inside', interim, [12, 5])
+            _issue(db, source, 'A-later', interim, [5])
+            head = load_rules(db, 'FOLLOWUP', [{'op': 'delete', 'key': 'A'}])
+            blocked = withdraw_rules(db, 'REQ-BLOCK', 'MISFILED')
+            check(blocked, {'status': 'blocked', 'report_id': 'Y-inside', 'position': 1})
+            check(read_catalog_head(db), head)
+            events.append({'case_id': 'blocked_same_catalog_history_changes',
+                           'anchor': anchor, 'interim': interim, 'head': head,
+                           'result': blocked,
+                           'note': 'current and interim catalogs both lack A, '
+                                   'but Y-inside row 1 would select A again'})
+            source.close()
+
+        # Reopen on the cold path: the object port stays closed for the recheck.
+        with closing(sqlite3.connect(path)) as db:
+            initialize(db)
+            check(withdraw_rules(db, 'REQ-BLOCK', 'MISFILED'), blocked)
+            events.append({'case_id': 'blocked_replayed_after_reopen',
+                           'result': blocked})
+
+    with TemporaryDirectory() as folder:
+        path = Path(folder) / 'safe.sqlite'
+        with closing(sqlite3.connect(path)) as db:
+            initialize(db)
+            source = ObservationObjects()
+            anchor = load_rules(db, 'BASE', [
+                {'op': 'put', 'key': 'A', 'group': 'length', 'priority': 1,
+                 'lower': 0, 'upper': 10, 'offset': 2},
+            ])
+            enable_withdrawal(db)
+            interim = load_rules(db, 'MISFILED', [{'op': 'delete', 'key': 'A'}])
+            _issue(db, source, 'Z-outside', interim, [12])  # only NO_MATCH rows
+            head = load_rules(db, 'FOLLOWUP', [{'op': 'delete', 'key': 'A'}])
+            before_bytes = retrieve(db, REPORT, 'Z-outside')
+            result = withdraw_rules(db, 'REQ-SAFE', 'MISFILED')
+            check(result['status'], 'withdrawn')
+            check(result['revision'], head + 1)
+            check(read_catalog_head(db), result['revision'])
+            check(get_catalog(db, result['revision']), ())  # identical content, new revision
+            check(retrieve(db, REPORT, 'Z-outside'), before_bytes)
+            check(load_rules(db, 'MISFILED', [{'op': 'delete', 'key': 'A'}]), interim)
+            events.append({'case_id': 'withdrawn_no_report_change',
+                           'anchor': anchor, 'interim': interim, 'head_before': head,
+                           'result': result,
+                           'replay_revision': interim,
+                           'note': 'new revision published even though the catalog '
+                                   'content is unchanged; old report bytes preserved'})
+    return events
 
 
 if __name__ == '__main__':

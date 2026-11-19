@@ -8,6 +8,7 @@ from lake.reports.bindings import (
 )
 from lake.reports.calibration import calibrate_rows
 from lake.reports.rows import encode_report_rows
+from lake.rules.withdrawal import freeze_report_facts
 from lake.store import ConflictError, ValidationError, identifier, write_transaction
 
 
@@ -44,5 +45,6 @@ def process(db, objects, report_id, batch_id, revision, *, before_commit=None):
 
         payload = assemble_report(binding, batch, calibrate_rows(observations, rules))
         save_report_binding(db, binding)
+        freeze_report_facts(db, binding, observations)
         stage_artifact(db, key, payload)
         return payload

@@ -26,6 +26,7 @@ python3 -B -m unittest discover -s tests -t . -v
 | 模块 | 接口 | 输入与返回 |
 | --- | --- | --- |
 | `lake.rules.revisions` | `load_rules(db, batch_id, operations)`、`read_catalog_head(db)` | 新批返回整数修订号。同名同规范化内容返回首次修订。 |
+| `lake.rules.revisions` | `enable_withdrawal(db, *, before_commit=None)`、`withdraw_rules(db, request_id, batch_id, *, before_commit=None)` | 撤回保护入口，见下文《参考批撤回》。 |
 | `lake.rules.snapshots` | `get_catalog(db, revision)` | 返回按键排序的 `Rule` 元组，包含 `write_id`。 |
 | `lake.intake.batches` | `admit(db, objects, batch_id, station, day, raw)` | 接纳 UTF-8 JSON 原件字节，返回批号。 |
 | `lake.reports.publication` | `process(db, objects, report_id, batch_id, revision)` | 返回固定报告字典。同号同绑定须重新核验固定输入才可重投。 |
@@ -39,3 +40,14 @@ python3 -B -m unittest discover -s tests -t . -v
 观测原件是有序数组，每行为 `{"group":"length","reading":5,"unit":"um"}`。支持 `um` 和 `mm`，`reading` 为整数或 `null`，缺测行也须有有效单位。规范化签名保留顺序和重复次数。报告 `rows` 中每行含零起始 `position`、`status`、`rule_key`、`write_id`、`corrected`。选择范围左闭右开，优先级数值越小越优先，同优先级按规则键。日结 `report_ids` 保留交接顺序，`stations` 按站号排序。站点值以 `ok`、`total`、`missing`、`no_match` 表示。度量整数用 JSON 保存，校正和求和全程使用整数。空数组可表示无规则操作、无观测或无交接报告。
 
 `lake.store` 提供 `ValidationError`、`ConflictError`、`NotFoundError`、`SourceUnavailableError` 和 `IntegrityError`。SQLite 操作及提交错误保留其原异常。规则批、接纳、报告与日结分别是完整事务。日结按观测批号排除重复覆盖，成果领取先核对完整摘要，再核对格式与编号。
+
+## 参考批撤回
+
+`enable_withdrawal(db)` 在当前目录头启用保护并返回锚点修订，本身不发布目录修订；重复启用返回同一锚点，撤回成功后不能再开启新一轮。保护期内**首次成功入仓的新规则批**是唯一可撤回的批（旧批重投沿用回执，不算新入仓），期内**首次成功签发的报告**均受保护。`withdraw_rules(db, request_id, batch_id)` 全量重算纠正目录：按修订顺序重放各批冻结的规范化操作并跳过目标批，其余批的显式等值写入、删除（含删除当时已缺席的键）仍在原修订生效，存续规则保留原 `write_id`。
+
+- 受阻挡：返回 `{"status": "blocked", "report_id": ..., "position": ...}`。按首次签发顺序找首份报告，再按原观测顺序找首个变化行；逐行比较 `status`、`write_id`、`corrected`（含 `MISSING`、`NO_MATCH`），选规身份变化但校正值相同也算变化。目录与报告不变，不占用请求号。
+- 安全撤回：发布新目录修订并推进目录头（即使纠正内容与当前目录相同），与成功回执同次提交，返回 `{"status": "withdrawn", "revision": ...}`。成功请求号与同批重投返回首次结果；同号换批或成功后再提另一笔抛 `ConflictError`；未启用、批号未知或不在保护范围抛 `ValidationError`。
+
+### 可重开的复核事实如何交接
+
+规则入仓时，除原有快照和回执外，规范化操作随入仓事务写入 `rule_batch_operations`，使纠正目录可以只凭冻结表重放而无需恢复原请求。报告首次签发且保护已启用时，`process` 在报告自己的提交事务内把该报告逐行规范化观测 `(position, group, reading)` 连同 SHA-256 摘要写入 `protected_report_facts`，并用自增序号固定首次签发顺序；报告原行仍冻结在成果库。撤回复核只读这两类冻结事实和 `catalog_snapshots`，绝不打开原件端口、不读取 `observation_objects` 的载荷，因此原件归冷、关库重开后仍可逐行复核。冻结事实缺失或摘要损坏时抛 `IntegrityError`。原修订、原报告、日结、V1 回执和接口全部保留原号原字节；撤回后重投已撤批仍返回它原先的入仓修订，不会重新作用于目录头。
